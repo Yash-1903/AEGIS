@@ -86,12 +86,192 @@ function firstToolName(tools) {
   return tools[0].function.name || 'default';
 }
 
+function promptText(options) {
+  return (options.messages || [])
+    .map((message) => (typeof message.content === 'string' ? message.content : JSON.stringify(message.content || '')))
+    .join('\n');
+}
+
+function selectMockToolName(options) {
+  const names = Array.isArray(options.tools)
+    ? options.tools.map((tool) => tool.function && tool.function.name).filter(Boolean)
+    : [];
+  const text = promptText(options);
+  const requested = names.find((name) => text.includes(name));
+  return requested || firstToolName(options.tools);
+}
+
+function textHas(text, patterns) {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
 function approximateTokens(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value || '');
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
-function buildMockPayload(toolName) {
+function buildScenarioAnalyzePayload(text) {
+  if (textHas(text, [/vssadmin/i, /\.encrypted\b/i, /RANSOMWARE/i, /backup service termination/i])) {
+    return {
+      detectedEvents: [{
+        type: 'RANSOMWARE',
+        sourceIP: '10.0.0.42',
+        targetHost: 'fileshare',
+        targetService: 'endpoint',
+        confidence: 0.94,
+        evidence: ['vssadmin.exe delete shadows /all /quiet', 'mass .encrypted file rename events', 'SMB workstation-to-workstation lateral movement'],
+        suggestedMitreTechnique: 'T1486',
+        severity: 'CRITICAL'
+      }],
+      overallAssessment: 'Ransomware impact behavior and lateral movement detected across workstation and file-share logs.',
+      recommendsEscalation: true,
+      confidence: 0.94
+    };
+  }
+  if (textHas(text, [/CANARY/i, /exfil-domain/i, /DATA_EXFILTRATION/i])) {
+    return {
+      detectedEvents: [{
+        type: 'DATA_EXFILTRATION',
+        sourceIP: '10.0.0.87',
+        targetHost: 'fileserver',
+        targetService: 'dns',
+        confidence: 0.88,
+        evidence: ['Repeated DNS queries to exfil-domain', 'CANARY file access from workstation'],
+        suggestedMitreTechnique: 'T1048',
+        severity: 'HIGH'
+      }],
+      overallAssessment: 'Possible slow DNS exfiltration with a canary file access signal.',
+      recommendsEscalation: true,
+      confidence: 0.88
+    };
+  }
+  return MOCK_RESPONSES.analyze_log_batch;
+}
+
+function buildScenarioClassificationPayload(text) {
+  if (textHas(text, [/RANSOMWARE/i, /vssadmin/i, /\.encrypted\b/i])) {
+    return {
+      type: 'RANSOMWARE',
+      severity: 'CRITICAL',
+      confidence: 0.94,
+      suggestedMitreTechnique: 'T1486',
+      mitreTactics: ['Impact', 'Lateral Movement'],
+      reasoning: 'Shadow copy deletion, mass encryption, and lateral SMB/RDP activity indicate ransomware.'
+    };
+  }
+  if (textHas(text, [/DATA_EXFILTRATION/i, /CANARY/i, /exfil-domain/i])) {
+    return {
+      type: 'DATA_EXFILTRATION',
+      severity: 'HIGH',
+      confidence: 0.88,
+      suggestedMitreTechnique: 'T1048',
+      mitreTactics: ['Exfiltration'],
+      reasoning: 'Canary access and suspicious DNS patterns indicate possible exfiltration.'
+    };
+  }
+  return {
+    type: 'BRUTE_FORCE',
+    severity: 'HIGH',
+    confidence: 0.89,
+    suggestedMitreTechnique: 'T1110',
+    mitreTactics: ['Credential Access'],
+    reasoning: 'Repeated failed SSH authentication followed by success indicates brute force.'
+  };
+}
+
+function buildScenarioRiskPayload(text) {
+  if (textHas(text, [/"threatSeverity":\s*"CRITICAL"/i, /RANSOMWARE/i, /"lateralMovementDetected":\s*true/i])) {
+    return {
+      riskScore: 9,
+      severity: 'CRITICAL',
+      confidence: 0.94,
+      reasoning: 'Critical ransomware with lateral movement requires high-impact containment review.'
+    };
+  }
+  if (textHas(text, [/DATA_EXFILTRATION/i, /"dataExfiltrationInProgress":\s*true/i])) {
+    return {
+      riskScore: 8,
+      severity: 'CRITICAL',
+      confidence: 0.88,
+      reasoning: 'Potential exfiltration against sensitive files requires analyst-gated containment.'
+    };
+  }
+  return MOCK_RESPONSES.calculate_risk_score;
+}
+
+function riskScoreFromText(text) {
+  const match = text.match(/"riskScore":\s*(10|[1-9])/i) || text.match(/\briskScore\b[^0-9]*(10|[1-9])/i);
+  return match ? Number(match[1]) : null;
+}
+
+function buildScenarioResponseLevelPayload(text) {
+  const riskScore = riskScoreFromText(text);
+  if (riskScore >= 10) {
+    return {
+      responseLevel: 5,
+      requiresHITL: true,
+      confidence: 0.95,
+      reasoning: 'Risk 10 maps to shutdown and must wait for human approval.'
+    };
+  }
+  if (riskScore >= 8 || textHas(text, [/RANSOMWARE/i, /DATA_EXFILTRATION/i])) {
+    return {
+      responseLevel: 4,
+      requiresHITL: true,
+      confidence: 0.92,
+      reasoning: 'Risk 8-9 maps to machine isolation and must wait for human approval.'
+    };
+  }
+  if (riskScore >= 6 || textHas(text, [/BRUTE_FORCE/i])) {
+    return MOCK_RESPONSES.determine_response_level;
+  }
+  if (riskScore >= 4) {
+    return {
+      responseLevel: 2,
+      requiresHITL: false,
+      confidence: 0.75,
+      reasoning: 'Risk 4-5 maps to reversible rate limiting.'
+    };
+  }
+  return {
+    responseLevel: 1,
+    requiresHITL: false,
+    confidence: 0.7,
+    reasoning: 'Low risk maps to alert-only monitoring.'
+  };
+}
+
+function buildMitrePayload(text) {
+  if (textHas(text, [/RANSOMWARE/i, /T1486/i, /lateral/i])) {
+    return {
+      mitreTechniques: ['T1486', 'T1021', 'T1562'],
+      mitreTactics: ['Impact', 'Lateral Movement', 'Defense Evasion'],
+      confidence: 0.9,
+      recommendations: ['Isolate affected workstation after HITL approval', 'Preserve endpoint and file-share evidence']
+    };
+  }
+  if (textHas(text, [/DATA_EXFILTRATION/i, /exfil/i, /CANARY/i])) {
+    return {
+      mitreTechniques: ['T1048', 'T1567'],
+      mitreTactics: ['Exfiltration'],
+      confidence: 0.84,
+      recommendations: ['Review DNS logs', 'Rotate exposed credentials and investigate canary access']
+    };
+  }
+  return {
+    mitreTechniques: ['T1110', 'T1078'],
+    mitreTactics: ['Credential Access', 'Initial Access'],
+    confidence: 0.86,
+    recommendations: ['Block the source IP', 'Review successful login activity']
+  };
+}
+
+function buildMockPayload(toolName, text) {
+  if (toolName === 'analyze_log_batch') return buildScenarioAnalyzePayload(text);
+  if (toolName === 'classify_attack_type') return buildScenarioClassificationPayload(text);
+  if (toolName === 'calculate_risk_score') return buildScenarioRiskPayload(text);
+  if (toolName === 'determine_response_level') return buildScenarioResponseLevelPayload(text);
+  if (toolName === 'map_to_mitre_attack') return buildMitrePayload(text);
   return MOCK_RESPONSES[toolName] || {
     summary: 'Mock reasoning completed without a specialized tool response.',
     confidence: 0.72,
@@ -100,8 +280,9 @@ function buildMockPayload(toolName) {
 }
 
 function buildMockChatCompletion(options) {
-  const toolName = firstToolName(options.tools);
-  const payload = buildMockPayload(toolName);
+  const toolName = selectMockToolName(options);
+  const text = promptText(options);
+  const payload = buildMockPayload(toolName, text);
   const content = JSON.stringify(payload);
   const promptTokens = approximateTokens(options.messages);
   const completionTokens = approximateTokens(content);

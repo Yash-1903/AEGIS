@@ -103,6 +103,13 @@ class TriageAgent extends AgentBase {
   async triageIncident(message) {
     try {
       this.memory.log(this.name, 'TRIAGE_PRE', { incidentId: message.incidentId, messageId: message.messageId });
+      if (message.eventType === EVENTS.INTEL_ENRICHED) {
+        this.memory.log(this.name, 'TRIAGE_DEFERRED_TO_ORCHESTRATOR', {
+          incidentId: message.incidentId,
+          messageId: message.messageId
+        });
+        return;
+      }
       const incidentId = message.incidentId || (message.data && message.data.incidentId);
       const incident = this.memory.getIncident(incidentId);
       if (!incident) throw new Error(`Incident not found: ${incidentId}`);

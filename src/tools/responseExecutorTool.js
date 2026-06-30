@@ -79,6 +79,10 @@ function responseRecord(actionId, action, target, rollbackToken, rollbackAvailab
   };
 }
 
+function statusAfterAction(action) {
+  return action === 'ALERT_ONLY' ? 'RESPONDING' : 'CONTAINED';
+}
+
 function updateIncidentResponses(memory, incidentId, record) {
   const incident = memory.getIncident(incidentId);
   if (!incident) {
@@ -89,7 +93,11 @@ function updateIncidentResponses(memory, incidentId, record) {
     return { incident, record: existing, duplicate: true };
   }
   const responses = [...incident.responses, record];
-  return { incident: memory.updateIncident(incidentId, { responses }), record, duplicate: false };
+  return {
+    incident: memory.updateIncident(incidentId, { responses, status: statusAfterAction(record.action) }),
+    record,
+    duplicate: false
+  };
 }
 
 function storeAlert(memory, alert) {

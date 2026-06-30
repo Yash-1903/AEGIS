@@ -115,20 +115,12 @@ class ResponseAgent extends AgentBase {
       this.memory.log(this.name, 'HANDLE_TRIAGED_PRE', { incidentId: message.incidentId });
       const incident = this.memory.getIncident(message.incidentId || (message.data && message.data.incidentId));
       if (!incident) throw new Error(`Incident not found: ${message.incidentId}`);
-      const responseLevel = message.data.responseLevel || incident.responseLevel;
-      const requiresHITL = Boolean(message.data.requiresHITL || incident.requiresHITL || responseLevel >= 4);
-      if (requiresHITL && incident.hitlStatus !== 'APPROVED') {
-        this.emit(EVENTS.HITL_REQUIRED, {
-          incidentId: incident.id,
-          proposedAction: message.data.proposedAction || { action: actionForLevel(responseLevel), responseLevel },
-          blastRadius: blastRadiusFor(actionForLevel(responseLevel), incident),
-          reasoning: 'Response level requires explicit human approval before execution.'
-        }, incident.id, 1);
-        this.memory.log(this.name, 'HANDLE_TRIAGED_POST', { incidentId: incident.id, skippedForHITL: true });
-        return;
-      }
-      await this.executeResponseAction(incident, message.data);
-      this.memory.log(this.name, 'HANDLE_TRIAGED_POST', { incidentId: incident.id, executed: true });
+      this.memory.log(this.name, 'HANDLE_TRIAGED_POST', {
+        incidentId: incident.id,
+        deferredToOrchestrator: true,
+        responseLevel: message.data.responseLevel || incident.responseLevel,
+        requiresHITL: Boolean(message.data.requiresHITL || incident.requiresHITL)
+      });
     } catch (error) {
       this.memory.log(this.name, 'HANDLE_TRIAGED_ERROR', { incidentId: message.incidentId, error: error.message });
       throw new Error(`handleIncidentTriaged failed: ${error.message}`);
@@ -223,7 +215,7 @@ class ResponseAgent extends AgentBase {
       const responses = [...incident.responses, record];
       const state = { actionId: record.actionId, rollbackToken: record.rollbackToken, incidentId: incident.id, reason: reasoning, status: action, updatedAt: now() };
       this.memory.isolatedMachines.set(target, action === 'SHUTDOWN' ? { ...state, servicesStopped: true, networkAccess: 'disabled' } : { ...state, isolatedAt: now(), networkAccess: 'quarantined' });
-      this.memory.updateIncident(incident.id, { responses });
+      this.memory.updateIncident(incident.id, { responses, status: 'CONTAINED' });
       this.emit(EVENTS.RESPONSE_EXECUTED, { action, actionId: record.actionId, rollbackToken: record.rollbackToken, target, blastRadius: blastRadiusFor(action, incident), confidence: 1 }, incident.id, 1);
       return { actionTaken: action, actionId: record.actionId, rollbackToken: record.rollbackToken, success: true, reasoning, blastRadius: blastRadiusFor(action, incident), confidence: 1 };
     } catch (error) {
